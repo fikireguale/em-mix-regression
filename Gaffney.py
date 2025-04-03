@@ -13,12 +13,14 @@ from copy import deepcopy
 
 def generateH(resp, M, K, nj):
     # Generate the H matrix (N x N) for each cluster
-    weights = []
+    Hk_matrices = []
     for k in range(K):
+        weights = []
         for j in range(M):
             temp = [resp[j][k]] * nj
             weights += temp
-    return np.diag(weights)
+        Hk_matrices.append(np.diag(weights))
+    return Hk_matrices
 
 def generateData(M, K, nj, l, noise_mean, noise_std, seed=42):
     """
@@ -341,7 +343,6 @@ def fit2(X, Y, M, K, nj, l, noise_mean, noise_std, seed=42, max_iter=10, tol=0.0
             break
     return
 
-
 def fit(X, Y, H, M, K, nj):
     for i in range(max_iter):
         params = mStep(X, Y, H, M, K, nj)
@@ -359,12 +360,12 @@ def main():
     
     M, K, nj, l, noise_mean, noise_std, max_iter = 12, 3, 10, 4, 0, 10, 5
     X, Y, H, resp = generateData(M, K, nj, l, noise_mean, noise_std)
-    '''
+    
     # Instead, of mstep estep use fit()
     params = mStep(X, Y, H, M, K, nj) # params1, ..., paramsK
     H, _ = eStep(X, Y, params, M, K, nj)
-    '''
-    fit(X, Y, H, M, K, nj, max_iter)
+    
+    #fit(X, Y, H, M, K, nj, max_iter)
 
     
 
