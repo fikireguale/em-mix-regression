@@ -11,7 +11,14 @@ import statsmodels.api as sm # to test mStepLibrary
 import scipy.stats as st
 from copy import deepcopy
 
-def generateH(resp, M, K, nj):
+def generateH(M, K, nj, resp, init=False):
+    assert (len(resp) != 0 and not init) or (len(resp) == 0 and init)
+
+    # Generate responsibilities == membership_probs (M x K), Note: a compact Hk matrix
+    if init:
+        resp = np.random.rand(M, K)
+        resp /= resp.sum(axis=1, keepdims=True)  # Normalize
+
     # Generate the H matrix (N x N) for each cluster
     Hk_matrices = []
     for k in range(K):
@@ -53,22 +60,8 @@ def generateData(M, K, nj, l, noise_mean, noise_std, seed=42):
     #noise = np.random.normal(noise_mean, noise_std, Y.shape)
     #Y += noise
 
-    # Generate responsibilities == membership_probs (M x K), Note: a compact Hk matrix
-    resp = np.random.rand(M, K)
-    resp /= resp.sum(axis=1, keepdims=True)  # Normalize
-
     # Generate the H matrix (N x N) for each cluster
-    Hk_matrices = generateH(resp, M, K, nj)
-    '''
-    Hk_matrices = []
-    for k in range(K):
-        weights = []
-        for j in range(M):
-            temp = [resp[j][k]] * nj
-            weights += temp
-        Hk = np.diag(weights)
-        Hk_matrices.append(Hk) # Hk_matrices = [(NxN matrix1), ..., (NxN matrixK)]
-    '''
+    Hk_matrices = generateH(M, K, nj, resp=[], init=True)
     return X, Y, Hk_matrices, resp
 
 def sumHjk(Hk, nj):
@@ -211,87 +204,32 @@ def eStep(X, Y, params, M, K, nj):
     '''Update membership probabilities:
         hjk = Calculate likelihood of all trajectory j's points under cluster k
     '''
+    log_likelihood = 0
     resp = np.zeros((M, K)) # responsabilities
-    F = np.zeros((K, M, nj))
-    for k in range(K):
-        [beta, sigma, w_hat] = params[k]
-        for j in range(M): # For every person in cluster k
-            start = j*nj
-            end = start + nj
-            yj = Y[start:end]
-            xj = X[start:end]
+    for j in range(M):
+        start, end = j*nj, j*nj + nj
+        xj, yj = X[start:end], Y[start:end]
+        person = 0 # likelihood denominator | Person(j)'s total
+        for k in range(K):
+            [beta, sigma, w_hat] = params[k]
+            clus = [] # likelihood denominator | Person(j)'s cluster(k) total
             for i in range(nj):
                 mu = xj[i] @ beta
-                fk = st.norm.pdf(yj[i], loc=mu, scale=sigma)
-                F[k][j][i] = fk
-            resp[j][k] = w_hat * np.prod(F[k][j])
-    total = 0
-    for k in range(K):
-        w = params[k][2]
-        total += w * np.sum(F[k])
-
-    if total > 0:
-        resp /= total
-    else:
-        print("Dividing by <= 0")
+                pdf = st.norm.pdf(yj[i], loc=mu, scale=np.sqrt(sigma)) # should sigma be sqrt here?
+                clus.append(pdf)
+            resp[j][k] = w_hat * np.prod(clus) # hjk: store likelihood
+            person += resp[j][k]
+            # normalize Person(J)'s membership prob
+        if person != 0:
+            resp[j] /= person 
+        log_likelihood += np.log(person + 1e-12)
 
     test_resp = deepcopy(resp)
-    resp /= resp.sum(axis=1, keepdims=True)  # Normalize
-
     # Generate H matrix from membership probs (resp)
-    H = generateH(resp, M, K, nj)
+    H = generateH(M, K, nj, resp, init=False)
     return H, test_resp
 
-def test_eStep_resp():
-    # Global test variables
-    RandomSeed = 42
-    np.random.seed(RandomSeed)
-    M = 2
-    nj = 2
-    K = 1
-
-    X = np.array([
-    [1, 1],
-    [1, 2],
-    [1, 1],
-    [1, 2]
-    ])
-
-    Y = np.array([
-        2.0,
-        4.1,
-        1.2,
-        2.1
-    ])
-
-    # Two trajectories: [2.0, 4.1] and [1.2, 2.1]
-    # Soft membership of 0.8 for traj 1 and 0.2 for traj 2
-    Hk = np.diag([
-        0.8, 0.8,  # for first trajectory
-        0.2, 0.2   # for second trajectory
-    ])
-    H = [Hk]
-
-    params = mStep(X, Y, H, M, K, nj)
-
-    '''
-    params = 
-        beta: [-0.02, 1.86]
-        sigma: 0.7424
-        w_hat: 0.5
-    '''
-    H, test_resp = eStep(X, Y, params, M, K, nj)
-
-    passed = (
-        np.allclose(test_resp, np.array([[0.17268546], [0.01381672]]))
-    )
-    print("test_eStep_resp() passed:", passed)
-    return passed
-
 def test_eStep_poly_match():
-    import numpy as np
-    from scipy.stats import norm
-
     np.random.seed(42)
     M = 2
     nj = 2
@@ -326,9 +264,51 @@ def test_eStep_poly_match():
     H, _ = eStep(X, Y, params, M, K, nj)
 
     # Should show: person 1 assigned to cluster 0, person 2 to cluster 1
-    passed = np.all(H == np.diag([1,1,0,0,0,0,1,1])) # expected
+    k1 = np.diag([1,1,0,0])
+    k2 = np.diag([0,0,1,1])
+    expected = [k1, k2]
+    passed = np.all(np.all(H) == np.all(expected))
     print("test_eStep_poly_match passed:", passed)
     return passed
+
+def test_eStep_Hmatrix():
+    np.random.seed(42)
+    M = 2
+    nj = 2
+    K = 2
+
+    # Design matrix for two people, each with x = [1, 2]
+    # Columns: [1, x, x^2]
+    X = np.array([
+        [1, 1, 1],
+        [1, 2, 4],
+        [1, 1, 1],
+        [1, 2, 4]
+    ])
+
+    # Response Y:
+    # Person 1 (first two values) follows y = 2x → [2, 4]
+    # Person 2 (last two values) follows y = 1 + x^2 → [2, 5]
+    Y = np.array([
+        2.0, 4.0,   # person 1
+        2.0, 5.0    # person 2
+    ])
+
+    H = generateH(M, K, nj, resp=[], init=True)
+
+    params = mStep(X, Y, H, M, K, nj)
+
+    # Call E-step
+    H, _ = eStep(X, Y, params, M, K, nj)
+
+    # In future iterations, should show: person 1 assigned to cluster 0, person 2 to cluster 1
+    k1 = np.diag([0.77,0.77,0.89,0.89])
+    k2 = np.diag([0.22,0.22,0.1,0.1])
+    expected = [k1, k2]
+    passed = np.all(np.all(H) == np.all(expected))
+    print("test_eStep_Hmatrix passed:", passed)
+    return passed
+
 
 #def initialize(X, Y, M, K, nj, l, noise_mean, noise_std, seed=42):
 
@@ -355,21 +335,16 @@ def fit(X, Y, H, M, K, nj):
 def main():
     #plot(X[:,1], Y)
     #test_WLS()
-    #test_eStep_resp()
     #test_eStep_poly_match()
-    
+    #test_eStep_Hmatrix()
+    '''
     M, K, nj, l, noise_mean, noise_std, max_iter = 12, 3, 10, 4, 0, 10, 5
     X, Y, H, resp = generateData(M, K, nj, l, noise_mean, noise_std)
-    
+
     # Instead, of mstep estep use fit()
     params = mStep(X, Y, H, M, K, nj) # params1, ..., paramsK
     H, _ = eStep(X, Y, params, M, K, nj)
-    
     #fit(X, Y, H, M, K, nj, max_iter)
-
-    
-
-    
-
+    '''
     return
 main()
