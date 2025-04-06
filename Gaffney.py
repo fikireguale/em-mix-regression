@@ -2,7 +2,7 @@
 # Python 3.11.9 64-bit version in usr/local/bin/python3
 nj: number of measurements for person j: fixed for now
 M = number of individuals (trajectories)
-K = max number of clusters = number of polynomials: fixed for now?
+K = max number of clusters = number of polynomials
 '''
 import numpy as np
 import copy
@@ -107,43 +107,33 @@ def mStep(X, Y, H, M, K, nj):
         '''
     return params
 
-def plot(x, y, coeff=[2,-1,3]): # 2x^2 - x + 3
-    plt.scatter(x, y)
-    y_poly = np.poly1d(coeff)
-    plt.plot(x, y_poly, label="poly", linestyle='--')
+def plot(x, y, params, run, true_coeff=[]):
+    true_coeff = [[120, 4, 0], [10, 2, 0.1], [250, -0.75, 0]]
+    coeff = []
+    for i, poly in enumerate(params):
+        [betas, sigma, w] = poly
+        coeff.append(betas[::-1])
+        true_coeff[i] = true_coeff[i][::-1]
+
+    plt.plot(x, y, 'o', mfc='none', color='dimgray')
+    colors = plt.cm.tab10(np.linspace(0, 1, len(coeff)))
+
+    for i, (c, tc) in enumerate(zip(coeff, true_coeff)):
+        polynomial = np.poly1d(c)
+        true_poly = np.poly1d(tc)
+
+        x = np.linspace(1, 44, 100)
+        y = polynomial(x)
+        true_y = true_poly(x)
+
+        plt.plot(x, y, color=colors[i])
+        plt.plot(x, true_y, color=colors[i], linestyle = '--')
+
     plt.xlabel('X-axis')
     plt.ylabel('Function value')
-    plt.title('')
-    plt.legend()
+    plt.title(f'Iteration {run}')
     plt.show()
     return
-
-def mStepLibrary(X, Y, H, M, K, nj):
-    params = []
-    for k in range(K):
-        Hk = H[k]
-
-        # Weighted Least Squares
-        model = sm.WLS(Y, X, weights=np.diag(Hk))
-        results = model.fit()
-
-        # --- Extract estimates ---
-        beta_hat = results.params                             
-        sigma2_hat = results.scale
-        # Note: Statsmodel WLS returns the unbiased estimate for variance, not MLE. 
-        
-        w_hat = (1/M) * sumHjk(Hk, nj)                       
-        params.append([beta_hat, sigma2_hat, w_hat])
-        '''
-        # Display results
-        print()
-        print("Library")
-        print("For k =", k)
-        print("β̂_k       =", beta_hat)
-        print("σ̂²_k      =", sigma2_hat)
-        print("ŵ_k       =", w_hat)
-        '''
-    return params
 
 def test_WLS():
     # Global test variables
@@ -330,33 +320,61 @@ def test_eStep_Hmatrix_more():
     inputs = [M, nj, K, X, Y]
     return passed, inputs
 
+def set_seed(seed=1082265693):
+    seed = np.random.randint(0, 2**32)
+    np.random.seed(seed)
+
 def fit(X, Y, M, K, nj, max_iter, tol, debug=False, resp_tol=1e-4):
     best_loglik = -np.inf
     best_params = None
     best_H = None
     best_resp = None
-    for i in range(10):
-        np.random.seed()
+    valid_snapshots = []  # List of (loglik, iteration, params)
+
+    for _ in range(10):
+        set_seed()
         H = generateH(M, K, nj, resp=[], init=True)
         prev_loglik = -np.inf
         resp = []
-        prev_resp = None
+        all_snapshots = []
+
         for i in range(max_iter):
             params = mStep(X, Y, H, M, K, nj)
             H, resp, loglik = eStep(X, Y, params, M, K, nj)
+            all_snapshots.append((loglik, i, deepcopy(params)))
 
             if (np.abs(loglik - prev_loglik) / abs(loglik + 0.1) < tol):
                 print(f"Converged at iteration {i}: Log-likelihood {loglik}")
                 break
-
             prev_loglik = loglik
-            prev_resp = resp.copy()
+        
+        if loglik > -551:
+            valid_snapshots.append(all_snapshots)
+        else:
+            all_snapshots = []
+
         if loglik > best_loglik:
             best_loglik = loglik
             best_params = params
             best_H = H
             best_resp = resp
-    return best_params, best_H, best_loglik, best_resp
+    return best_params, best_H, best_loglik, best_resp, valid_snapshots
+
+def plot_snapshots(x, y, snapshots):
+    # Flatten
+    if isinstance(snapshots[0], list) and len(snapshots) == 1:
+        snapshots = snapshots[0]
+
+    if not snapshots:
+        print("No snapshots to plot.")
+        return
+
+    total = len(snapshots)
+    target_indices = [0, total // 4, total // 2, 3 * total // 4, total - 1]
+
+    for i in target_indices:
+        [loglik, run, params] = snapshots[i]
+        plot(x, y, params, run)
 
 def print_params(params):
     print("\n Fitted Model Parameters:\n")
@@ -383,7 +401,6 @@ def print_resp(resp, precision=3):
         probs = "  ".join([f"{resp[j][k]:>{8}.{precision}f}" for k in range(K)])
         assigned = np.argmax(resp[j])
         print(f"{j:<8}  {probs}   → Cluster {assigned}")
-    print(resp)
 
 def paper_fit():
     '''
@@ -395,17 +412,19 @@ def paper_fit():
     cluster3: [250, -0.75, 0]
     '''
 
-    M, K, nj, l, noise_mean, noise_std, max_iter, tol = 12, 3, 10, 4, 0, 1, 50, 1e-12 # 100, 1e-15
+    M, K, nj, l, noise_mean, noise_std, max_iter, tol = 12, 3, 10, 4, 0, 1, 50, 1e-15 # max_iter=100, tol=1e-15 
     X, Y = generateData(M, K, nj, l, noise_mean, noise_std)
+    params, _, loglik, resp, snapshots = fit(X, Y, M, K, nj, max_iter, tol)
 
-    params, _, loglik, resp = fit(X, Y, M, K, nj, max_iter, tol)
-    
     print("Loglik:", loglik)
     print_params(params)
     print_resp(resp)
-    return
+    plot_snapshots(X[:, 1], Y, snapshots)
+
+    return params, X, Y
 
 def main():
+    set_seed()
     paper_fit()
     return
 main()
