@@ -12,13 +12,12 @@ import scipy.stats as st
 from copy import deepcopy
 
 def generateH(M, K, nj, resp, init=False):
+    ''' Generate responsibilities == membership_probs (M x K)'''
     assert (len(resp) != 0 and not init) or (len(resp) == 0 and init)
 
-    # Generate responsibilities == membership_probs (M x K), Note: a compact Hk matrix
     if init:
-        resp = np.random.rand(M, K)
-        resp /= resp.sum(axis=1, keepdims=True)  # Normalize
-
+        resp = np.random.dirichlet([1] * K, size=M)
+    
     # Generate the H matrix (N x N) for each cluster
     Hk_matrices = []
     for k in range(K):
@@ -30,8 +29,6 @@ def generateH(M, K, nj, resp, init=False):
     return Hk_matrices
 
 def generateData(M, K, nj, l, noise_mean, noise_std, seed=42):
-    """
-    """
     # Generate X matrix
     ones = np.array([1]*nj)
     firstOrder = np.array([1, 6, 9, 12, 21, 26, 36, 39, 43, 44])
@@ -56,13 +53,11 @@ def generateData(M, K, nj, l, noise_mean, noise_std, seed=42):
                 Yj = np.append(Yj, poly(X[:,1][i])) # array[:, 0] --> get 2nd column
                 i += 1
             Y = np.append(Y, Yj)
-    #np.random.seed(seed)
-    #noise = np.random.normal(noise_mean, noise_std, Y.shape)
-    #Y += noise
+    
+    noise = np.random.normal(noise_mean, noise_std, Y.shape)
+    Y += noise
 
-    # Generate the H matrix (N x N) for each cluster
-    Hk_matrices = generateH(M, K, nj, resp=[], init=True)
-    return X, Y, Hk_matrices, resp
+    return X, Y
 
 def sumHjk(Hk, nj):
     # Hk must be (N x N)
@@ -70,6 +65,9 @@ def sumHjk(Hk, nj):
     for i in range(0, Hk.shape[0], nj):
         diagonal_sum += Hk[i, i]
     return diagonal_sum
+
+def is_singular(X):
+    return bool(np.linalg.matrix_rank(X) < X.shape[1])
 
 def mStep(X, Y, H, M, K, nj):
     ''' Estimate regression parameters for each cluster'''
@@ -80,7 +78,10 @@ def mStep(X, Y, H, M, K, nj):
         # Compute beta_hat
         Xt_H_X = X.T @ Hk @ X
         Xt_H_Y = (X.T @ Hk @ Y).reshape(-1,1)
-        beta_hat = np.linalg.inv(Xt_H_X) @ Xt_H_Y
+        if is_singular(X):
+            beta_hat = np.linalg.pinv(Xt_H_X) @ Xt_H_Y
+        else:
+            beta_hat = np.linalg.inv(Xt_H_X) @ Xt_H_Y
 
         # Compute variance
         sum_hjk = sumHjk(Hk, nj)
@@ -94,6 +95,7 @@ def mStep(X, Y, H, M, K, nj):
         # Cleanup
         beta_hat = beta_hat.T[0]
         sigma2_hat = sigma2_hat[0][0]
+        sigma2_hat = max(sigma2_hat, 1e-3) #1e-3
         params.append([beta_hat, sigma2_hat, w_hat])
         '''
         # Display results
@@ -105,8 +107,10 @@ def mStep(X, Y, H, M, K, nj):
         '''
     return params
 
-def plot(x, y):
+def plot(x, y, coeff=[2,-1,3]): # 2x^2 - x + 3
     plt.scatter(x, y)
+    y_poly = np.poly1d(coeff)
+    plt.plot(x, y_poly, label="poly", linestyle='--')
     plt.xlabel('X-axis')
     plt.ylabel('Function value')
     plt.title('')
@@ -181,25 +185,6 @@ def test_WLS():
     print("test_WLS() passed:", passed)
     return passed
 
-def gaussian_likelihood(y, x, beta_k, sigma2_k):
-    """
-    Computes the Gaussian likelihood for a single trajectory's observations 
-    under component k, given regression parameters.
-
-    Args:
-        y (np.ndarray): Observed outputs, shape (n_j,)
-        x (np.ndarray): Design matrix X_j, shape (n_j, p+1)
-        beta_k (np.ndarray): Regression coefficients, shape (p+1,)
-        sigma2_k (float): Variance
-
-    Returns:
-        float: Likelihood of y under N(x^T beta_k, sigma2_k)
-    """
-    mu = x.reshape(-1,1) @ beta_k                     # shape (n_j,)
-    #sigma = np.sqrt(sigma2_k)
-    pdf_vals = norm.pdf(y, loc=mu, scale=sigma2_k)
-    return np.prod(pdf_vals)           # product over i
-
 def eStep(X, Y, params, M, K, nj):
     '''Update membership probabilities:
         hjk = Calculate likelihood of all trajectory j's points under cluster k
@@ -215,19 +200,18 @@ def eStep(X, Y, params, M, K, nj):
             clus = [] # likelihood denominator | Person(j)'s cluster(k) total
             for i in range(nj):
                 mu = xj[i] @ beta
-                pdf = st.norm.pdf(yj[i], loc=mu, scale=np.sqrt(sigma)) # should sigma be sqrt here?
+                pdf = st.norm.pdf(yj[i], loc=mu, scale=np.sqrt(sigma))
                 clus.append(pdf)
             resp[j][k] = w_hat * np.prod(clus) # hjk: store likelihood
             person += resp[j][k]
             # normalize Person(J)'s membership prob
         if person != 0:
             resp[j] /= person 
-        log_likelihood += np.log(person + 1e-12)
-
+        log_likelihood += np.log(person + 1e-20) # before it was 1e-12, 1e-20 worked
     test_resp = deepcopy(resp)
     # Generate H matrix from membership probs (resp)
     H = generateH(M, K, nj, resp, init=False)
-    return H, test_resp
+    return H, test_resp, log_likelihood
 
 def test_eStep_poly_match():
     np.random.seed(42)
@@ -261,7 +245,7 @@ def test_eStep_poly_match():
     ]
 
     # Call E-step
-    H, _ = eStep(X, Y, params, M, K, nj)
+    H, _, _ = eStep(X, Y, params, M, K, nj)
 
     # Should show: person 1 assigned to cluster 0, person 2 to cluster 1
     k1 = np.diag([1,1,0,0])
@@ -299,7 +283,7 @@ def test_eStep_Hmatrix():
     params = mStep(X, Y, H, M, K, nj)
 
     # Call E-step
-    H, _ = eStep(X, Y, params, M, K, nj)
+    H, _, _ = eStep(X, Y, params, M, K, nj)
 
     # In future iterations, should show: person 1 assigned to cluster 0, person 2 to cluster 1
     k1 = np.diag([0.77,0.77,0.89,0.89])
@@ -307,44 +291,121 @@ def test_eStep_Hmatrix():
     expected = [k1, k2]
     passed = np.all(np.all(H) == np.all(expected))
     print("test_eStep_Hmatrix passed:", passed)
-    return passed
+    inputs = [M, nj, K, X, Y]
+    return passed, inputs
 
+def test_eStep_Hmatrix_more():
+    np.random.seed(42)
+    M = 4  # 4 trajectories (2 per cluster)
+    nj = 3  # 3 measurements per trajectory
+    K = 2
 
-#def initialize(X, Y, M, K, nj, l, noise_mean, noise_std, seed=42):
+    # Expanded x = [1, 2, 3] → [1, 1, 1], [1, 2, 4], [1, 3, 9]
+    X_traj = np.array([
+        [1, 1, 1],
+        [1, 2, 4],
+        [1, 3, 9]
+    ])
+    X = np.vstack([X_traj for _ in range(M)])
 
-def fit2(X, Y, M, K, nj, l, noise_mean, noise_std, seed=42, max_iter=10, tol=0.001):
-    a = initialize(X, Y, M, K, nj, l, noise_mean, noise_std, seed=42)
-    for i in range(max_iter):
-        old_means = np.copy(self.means)
-        responsibilities = self._e_step(X)
-        self._m_step(X, responsibilities)
+    # Responses:
+    # Cluster 0 (linear): y = 2x
+    # Cluster 1 (quadratic): y = 1 + x^2
+    Y_cluster0 = np.array([2, 4, 6])
+    Y_cluster1 = np.array([2, 5, 10])
+    Y = np.concatenate([
+        Y_cluster0,  # person 0
+        Y_cluster0,  # person 1
+        Y_cluster1,  # person 2
+        Y_cluster1   # person 3
+    ])
 
-        if np.sum((self.means - old_means)**2) < tol:
-            break
-    return
+    H = generateH(M, K, nj, resp=[], init=True)
+    params = mStep(X, Y, H, M, K, nj)
+    H, _, _ = eStep(X, Y, params, M, K, nj)
 
-def fit(X, Y, H, M, K, nj):
-    for i in range(max_iter):
-        params = mStep(X, Y, H, M, K, nj)
-        H, _ = eStep(X, Y, params, M, K, nj)
+    # Just check no cluster collapse and all values are finite
+    passed = all(np.isfinite([p for param in params for p in param[0]])) and all([np.isfinite(p[1]) for p in params])
+    print("test_eStep_Hmatrix passed:", passed)
+    inputs = [M, nj, K, X, Y]
+    return passed, inputs
 
-        if np.sum((self.means - old_means)**2) < tol:
-            break
+def fit(X, Y, M, K, nj, max_iter, tol, debug=False, resp_tol=1e-4):
+    best_loglik = -np.inf
+    best_params = None
+    best_H = None
+    best_resp = None
+    for i in range(10):
+        np.random.seed()
+        H = generateH(M, K, nj, resp=[], init=True)
+        prev_loglik = -np.inf
+        resp = []
+        prev_resp = None
+        for i in range(max_iter):
+            params = mStep(X, Y, H, M, K, nj)
+            H, resp, loglik = eStep(X, Y, params, M, K, nj)
+
+            if (np.abs(loglik - prev_loglik) / abs(loglik + 0.1) < tol):
+                print(f"Converged at iteration {i}: Log-likelihood {loglik}")
+                break
+
+            prev_loglik = loglik
+            prev_resp = resp.copy()
+        if loglik > best_loglik:
+            best_loglik = loglik
+            best_params = params
+            best_H = H
+            best_resp = resp
+    return best_params, best_H, best_loglik, best_resp
+
+def print_params(params):
+    print("\n Fitted Model Parameters:\n")
+
+    for idx, (beta, sigma2, w) in enumerate(params):
+        b0, b1, b2 = beta
+        print(f"Cluster {idx}:")
+        print(f"  β̂ (coefficients):      [{b0:.2f}, {b1:.2f}, {b2:.3f}]")
+        print(f"  σ̂² (variance):         {sigma2:.2f}")
+        print(f"  ŵ  (mixing weight):     {w:.4f}")
+        print(f"  ⇒ Polynomial:           y = {b0:.2f} + {b1:.2f}·x + {b2:.3f}·x²\n")
+
+def print_resp(resp, precision=3):
+    M, K = resp.shape
+    print("\n Responsibility Matrix (resp):\n")
+
+    # Header
+    header = "Person".ljust(8) + "".join([f"Cluster {k}".rjust(12) for k in range(K)]) + "   Assigned to"
+    print(header)
+    print("-" * len(header))
+
+    # Rows
+    for j in range(M):
+        probs = "  ".join([f"{resp[j][k]:>{8}.{precision}f}" for k in range(K)])
+        assigned = np.argmax(resp[j])
+        print(f"{j:<8}  {probs}   → Cluster {assigned}")
+    print(resp)
+
+def paper_fit():
+    '''
+    # Expected polynomials
+     y1 = 120+ 4x, y2 = 10+ 2x + 0.1x^2, and y3 = 250 - 0.75x
+
+    cluster1: [120, 4, 0]
+    cluster2: [10, 2, 0.1]
+    cluster3: [250, -0.75, 0]
+    '''
+
+    M, K, nj, l, noise_mean, noise_std, max_iter, tol = 12, 3, 10, 4, 0, 1, 50, 1e-12 # 100, 1e-15
+    X, Y = generateData(M, K, nj, l, noise_mean, noise_std)
+
+    params, _, loglik, resp = fit(X, Y, M, K, nj, max_iter, tol)
+    
+    print("Loglik:", loglik)
+    print_params(params)
+    print_resp(resp)
     return
 
 def main():
-    #plot(X[:,1], Y)
-    #test_WLS()
-    #test_eStep_poly_match()
-    #test_eStep_Hmatrix()
-    '''
-    M, K, nj, l, noise_mean, noise_std, max_iter = 12, 3, 10, 4, 0, 10, 5
-    X, Y, H, resp = generateData(M, K, nj, l, noise_mean, noise_std)
-
-    # Instead, of mstep estep use fit()
-    params = mStep(X, Y, H, M, K, nj) # params1, ..., paramsK
-    H, _ = eStep(X, Y, params, M, K, nj)
-    #fit(X, Y, H, M, K, nj, max_iter)
-    '''
+    paper_fit()
     return
 main()
