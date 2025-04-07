@@ -361,13 +361,13 @@ def fit(X, Y, M, K, nj, max_iter, tol, debug=False, resp_tol=1e-4):
     return best_params, best_H, best_loglik, best_resp, valid_snapshots
 
 def plot_snapshots(x, y, snapshots):
-    # Flatten
-    if isinstance(snapshots[0], list) and len(snapshots) == 1:
-        snapshots = snapshots[0]
-
     if not snapshots:
         print("No snapshots to plot.")
         return
+
+    # Flatten
+    if isinstance(snapshots[0], list) and len(snapshots) == 1:
+        snapshots = snapshots[0]
 
     total = len(snapshots)
     target_indices = [0, total // 4, total // 2, 3 * total // 4, total - 1]
@@ -412,7 +412,7 @@ def paper_fit():
     cluster3: [250, -0.75, 0]
     '''
 
-    M, K, nj, l, noise_mean, noise_std, max_iter, tol = 12, 3, 10, 4, 0, 1, 50, 1e-15 # max_iter=100, tol=1e-15 
+    M, K, nj, l, noise_mean, noise_std, max_iter, tol = 12, 3, 10, 4, 0, 5, 50, 1e-15 # max_iter=100, tol=1e-15 
     X, Y = generateData(M, K, nj, l, noise_mean, noise_std)
     params, _, loglik, resp, snapshots = fit(X, Y, M, K, nj, max_iter, tol)
 
